@@ -17,7 +17,9 @@ import org.slf4j.LoggerFactory;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * This is related to https://www.ip2location.com/
@@ -30,6 +32,11 @@ public class CachedIpv4LocationService implements Ipv4LocationService {
 
     private RadixTree<Ipv4Loc> radixTree;
 
+    private LocalDateTime startTime;
+    private LocalDateTime initializedTime;
+
+    private AtomicBoolean initialized = new AtomicBoolean(false);
+
     private static class Singleton {
         public static CachedIpv4LocationService INSTANCE = new CachedIpv4LocationService();
     }
@@ -39,17 +46,19 @@ public class CachedIpv4LocationService implements Ipv4LocationService {
     }
 
     public CachedIpv4LocationService(String path) {
+        startTime = LocalDateTime.now();
         this.path = path;
         init();
     }
 
     public CachedIpv4LocationService() {
+        startTime = LocalDateTime.now();
         Uniconf uniconf = new Uniconf();
         path = uniconf.lookupProperty("mayton.ip2loc.Ipv4LocationServiceRadix.path").orElseThrow();
         init();
     }
 
-    private void init() {
+    private void initThreadFunction() {
         logger.info("path = {}", path);
         try {
             logger.info("constructor");
@@ -101,21 +110,38 @@ public class CachedIpv4LocationService implements Ipv4LocationService {
                 logger.trace("{}", ipv4Loc);
             }
             csvParser.close();
+            initialized.set(true);
+            initializedTime = LocalDateTime.now();
         } catch (Exception ex) {
             logger.error("{}", ex.getMessage());
             throw new RuntimeException(ex);
         }
     }
 
+    private void init() {
+        new Thread(() -> {
+              initThreadFunction();
+        }).start();
+    }
+
     @Override
     public Optional<Ipv4Loc> resolve(String ipv4) {
-        Optional<String> binary = Ip2locUtils.ipv4toBinaryString(ipv4);
-        if (binary.isEmpty())
+
+        if (initialized.get()) {
+            Optional<String> binary = Ip2locUtils.ipv4toBinaryString(ipv4);
+            if (binary.isEmpty())
+                return Optional.empty();
+
+            synchronized (radixTree) {
+                Iterator<Ipv4Loc> res = radixTree.getValuesForClosestKeys(binary.get()).iterator();
+                return res.hasNext() ?
+                        Optional.of(res.next()) :
+                        Optional.empty();
+            }
+
+        } else {
             return Optional.empty();
-        Iterator<Ipv4Loc> res = radixTree.getValuesForClosestKeys(binary.get()).iterator();
-        return res.hasNext() ?
-                Optional.of(res.next()) :
-                Optional.empty();
+        }
     }
 
     @Override
